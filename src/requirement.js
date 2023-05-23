@@ -3,6 +3,7 @@ const core = require( '@actions/core' );
 const { SError } = require( 'error' );
 const picomatch = require( 'picomatch' );
 const fetchTeamMembers = require( './team-members.js' );
+const github = require( '@actions/github' );
 
 class RequirementError extends SError {}
 
@@ -29,12 +30,19 @@ function printSet( label, items ) {
 function buildReviewerFilter( config, teamConfig, indent ) {
 	if ( typeof teamConfig === 'string' ) {
 		const team = teamConfig;
-		return async function ( reviewers ) {
+		return async function ( reviewers, creator ) {
 			const members = await fetchTeamMembers( team );
-			return printSet(
-				`${ indent }Members of ${ team }:`,
-				reviewers.filter( reviewer => members.includes( reviewer ) )
-			);
+			if ( typeof creator === 'string' ) {
+				return printSet(
+					`${ indent }PR opened by a member of ${ team }:`,
+					members.includes( creator ) ? [creator] : []
+				)
+			} else {
+				return printSet(
+					`${ indent }Members of ${ team }:`,
+					reviewers.filter( reviewer => members.includes( reviewer ) )
+				);
+			}
 		};
 	}
 
@@ -55,6 +63,7 @@ function buildReviewerFilter( config, teamConfig, indent ) {
 	switch ( op ) {
 		case 'any-of':
 		case 'all-of':
+		case 'pr-opened-by':
 			// These ops require an array of teams/objects.
 			if ( ! Array.isArray( arg ) ) {
 				throw new RequirementError( `Expected an array of teams, got ${ typeof arg }`, {
@@ -79,25 +88,37 @@ function buildReviewerFilter( config, teamConfig, indent ) {
 	}
 
 	if ( op === 'any-of' ) {
-		return async function ( reviewers ) {
-			core.info( `${ indent }Union of these:` );
+		return async function ( reviewers, creator ) {
+			core.info( `${ indent }At least one of these conditions:` );
 			return printSet( `${ indent }=>`, [
 				...new Set(
-					( await Promise.all( arg.map( f => f( reviewers, `${ indent }  ` ) ) ) ).flat( 1 )
+					( await Promise.all( arg.map( f => f( reviewers, creator, `${ indent }  ` ) ) ) ).flat( 1 )
 				),
 			] );
 		};
 	}
 
 	if ( op === 'all-of' ) {
-		return async function ( reviewers ) {
-			core.info( `${ indent }Union of these, if none are empty:` );
-			const filtered = await Promise.all( arg.map( f => f( reviewers, `${ indent }  ` ) ) );
+		return async function ( reviewers, creator ) {
+			core.info( `${ indent }All of these conditions:` );
+			const filtered = await Promise.all( arg.map( f => f( reviewers, creator, `${ indent }  ` ) ) );
 			if ( filtered.some( a => a.length === 0 ) ) {
 				return printSet( `${ indent }=>`, [] );
 			}
 			return printSet( `${ indent }=>`, [ ...new Set( filtered.flat( 1 ) ) ] );
 		};
+	}
+
+	if ( op === 'pr-opened-by' ) {
+		const creator = github.context.payload.pull_request.user.login;
+		return async function ( reviewers ) {
+			core.info( `${ indent }Pull Request opened by:` );
+			return printSet( `${ indent }=>`, [
+				...new Set(
+					( await Promise.all( arg.map( f => f( reviewers, creator, `${ indent }  ` ) ) ) ).flat( 1 )
+				),
+			] );
+		}
 	}
 
 	// WTF?
